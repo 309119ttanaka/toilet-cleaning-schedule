@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>トイレ清掃作業日程表メーカー</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+        .day-header { text-align: center; font-weight: bold; font-size: 0.875rem; padding: 4px 0; }
+        .day-cell { min-height: 80px; border-radius: 6px; padding: 4px; cursor: pointer; transition: background-color 0.2s; border: 1px solid #e5e7eb; background-color: #fff; }
+        .day-cell:hover { border-color: #3b82f6; }
+        .day-cell.out-of-month { background-color: #f9fafb; opacity: 0.5; }
+        .day-cell.is-workday { background-color: #eff6ff; border-color: #60a5fa; border-width: 2px; }
+        .day-cell.is-weekend { background-color: #fff1f2; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        const getDefaultData = (y) => ({
+            periods: [
+                { id: 1, start: `${y}-04-06`, end: `${y}-07-27`, a: [1, 3, 5], b: [] },
+                { id: 2, start: `${y}-08-21`, end: `${y}-12-28`, a: [1, 3, 5], b: [] },
+                { id: 3, start: `${y+1}-01-13`, end: `${y+1}-03-26`, a: [1, 3, 5], b: [] },
+            ],
+            locations: ['', ''],
+            schedule: {}
+        });
+
+        const App = () => {
+            const [year, setYear] = useState(() => {
+                const saved = localStorage.getItem('lastSelectedYear');
+                if (saved) return parseInt(saved, 10);
+                // 保存された年度がない場合のデフォルトを「翌年度」に設定
+                const now = new Date();
+                const currentY = now.getFullYear();
+                const currentM = now.getMonth() + 1;
+                return currentM >= 4 ? currentY + 1 : currentY;
+            });
+            const [activeTab, setActiveTab] = useState('settings'); // settings, calendar, list
+            
+            // --- Data Persistence ---
+            const [appData, setAppData] = useState(() => {
+                const saved = localStorage.getItem('schedule_app_data');
+                return saved ? JSON.parse(saved) : {};
+            });
+
+            const currentData = appData[year] || getDefaultData(year);
+            const periods = currentData.periods;
+            const locations = currentData.locations;
+            const schedule = currentData.schedule;
+
+            const updateCurrentData = (newDataParts) => {
+                setAppData(prev => {
+                    const updated = {
+                        ...prev,
+                        [year]: {
+                            ...(prev[year] || getDefaultData(year)),
+                            ...newDataParts
+                        }
+                    };
+                    localStorage.setItem('schedule_app_data', JSON.stringify(updated));
+                    return updated;
+                });
+            };
+
+            const setPeriods = (val) => updateCurrentData({ periods: typeof val === 'function' ? val(periods) : val });
+            const setLocations = (val) => updateCurrentData({ locations: typeof val === 'function' ? val(locations) : val });
+            const setSchedule = (val) => updateCurrentData({ schedule: typeof val === 'function' ? val(schedule) : val });
+            
+            const hasLocations = useMemo(() => {
+                return Object.values(schedule).some(row => row.location);
+            }, [schedule]);
+
+            // Calendar View State
+            const [currentMonth, setCurrentMonth] = useState(4); // 4 = April
+            const [viewYear, setViewYear] = useState(year);
+            const [editingDate, setEditingDate] = useState(null);
+            
+            // Highlight Irregular Days
+            const [highlightIrregular, setHighlightIrregular] = useState(true);
+
+            // Year format display
+            const [yearFormat, setYearFormat] = useState('japanese');
+
+            // --- 色パレットと色取得関数 ---
+            const colorPalette = [
+                { bg: 'bg-blue-500', light: 'bg-blue-100', hex: 'FFDBEAFE' },
+                { bg: 'bg-green-500', light: 'bg-green-100', hex: 'FFDCFCE7' },
+                { bg: 'bg-purple-500', light: 'bg-purple-100', hex: 'FFF3E8FF' },
+                { bg: 'bg-orange-500', light: 'bg-orange-100', hex: 'FFFFEDD5' },
+                { bg: 'bg-pink-500', light: 'bg-pink-100', hex: 'FFFCE7F3' },
+                { bg: 'bg-cyan-500', light: 'bg-cyan-100', hex: 'FFCFFAFE' },
+            ];
+
+            const getLocationColorInfo = (locName) => {
+                if (!locName) return null;
+                const validLocs = locations.map(l => l.trim()).filter(l => l);
+                const idx = validLocs.indexOf(locName);
+                if (idx !== -1) return colorPalette[idx % colorPalette.length];
+                return { bg: 'bg-gray-500', light: 'bg-gray-100', hex: 'FFF3F4F6' };
+            };
+
+            const getJapaneseYear = (y) => {
+                if (y >= 2019) return `令和${y - 2018 === 1 ? '元' : y - 2018}`;
+                if (y >= 1989) return `平成${y - 1988 === 1 ? '元' : y - 1988}`;
+                if (y >= 1926) return `昭和${y - 1925 === 1 ? '元' : y - 1925}`;
+                return y;
+            };
+
+            // Months sequence for Japanese school year (April to March)
+            const months = [
+                { m: 4, y: year }, { m: 5, y: year }, { m: 6, y: year }, { m: 7, y: year },
+                { m: 8, y: year }, { m: 9, y: year }, { m: 10, y: year }, { m: 11, y: year },
+                { m: 12, y: year }, { m: 1, y: year + 1 }, { m: 2, y: year + 1 }, { m: 3, y: year + 1 }
+            ];
+
+            useEffect(() => {
+                setViewYear(currentMonth >= 4 ? year : year + 1);
+            }, [currentMonth, year]);
+
+            // --- Handlers ---
+            const getHolidays = (y) => {
+                const h = {};
+                const add = (m, d, name) => h[`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`] = name;
+                
+                // 固定祝日
+                add(1, 1, '元日'); add(2, 11, '建国記念の日'); add(2, 23, '天皇誕生日');
+                add(4, 29, '昭和の日'); add(5, 3, '憲法記念日'); add(5, 4, 'みどりの日'); add(5, 5, 'こどもの日');
+                add(8, 11, '山の日'); add(11, 3, '文化の日'); add(11, 23, '勤労感謝の日');
+
+                // ハッピーマンデー計算
+                const getNth = (m, nth, dow) => {
+                    const d = new Date(y, m - 1, 1);
+                    let c = 0;
+                    for (let i = 1; i <= 31; i++) {
+                        d.setDate(i);
+                        if (d.getMonth() !== m - 1) break;
+                        if (d.getDay() === dow) {
+                            c++;
+                            if (c === nth) return i;
+                        }
+                    }
+                    return -1;
+                };
+
+                add(1, getNth(1, 2, 1), '成人の日'); add(7, getNth(7, 3, 1), '海の日');
+                add(9, getNth(9, 3, 1), '敬老の日'); add(10, getNth(10, 2, 1), 'スポーツの日');
+
+                // 春分の日・秋分の日 (簡易計算 1980~2099年)
+                const shunbun = Math.floor(20.8431 + 0.242194 * (y - 1980)) - Math.floor((y - 1980) / 4);
+                add(3, shunbun, '春分の日');
+                const shubun = Math.floor(23.2488 + 0.242194 * (y - 1980)) - Math.floor((y - 1980) / 4);
+                add(9, shubun, '秋分の日');
+
+                // 振替休日
+                const dates = Object.keys(h).sort();
+                dates.forEach(ds => {
+                    const d = new Date(ds);
+                    if (d.getDay() === 0) { // 日曜が祝日
+                        let subD = new Date(d);
+                        subD.setDate(subD.getDate() + 1);
+                        while (h[`${y}-${String(subD.getMonth()+1).padStart(2, '0')}-${String(subD.getDate()).padStart(2, '0')}`]) {
+                            subD.setDate(subD.getDate() + 1);
+                        }
+                        h[`${y}-${String(subD.getMonth()+1).padStart(2, '0')}-${String(subD.getDate()).padStart(2, '0')}`] = '振替休日';
+                    }
+                });
+
+                // 国民の休日 (祝日と祝日に挟まれた平日)
+                const allDates = Object.keys(h).sort();
+                for (let i = 0; i < allDates.length - 1; i++) {
+                    const d1 = new Date(allDates[i]);
+                    const d2 = new Date(allDates[i+1]);
+                    const diff = (d2 - d1) / (1000 * 60 * 60 * 24);
+                    if (diff === 2) {
+                        const middle = new Date(d1);
+                        middle.setDate(middle.getDate() + 1);
+                        if (middle.getDay() !== 0) {
+                            h[`${y}-${String(middle.getMonth()+1).padStart(2, '0')}-${String(middle.getDate()).padStart(2, '0')}`] = '国民の休日';
+                        }
+                    }
+                }
+
+                return h;
+            };
+
+            const updatePeriod = (id, field, value, weekType = null) => {
+                setPeriods(prev => prev.map(p => {
+                    if (p.id !== id) return p;
+                    if (weekType) {
+                        const arr = p[weekType];
+                        const newArr = arr.includes(value) ? arr.filter(v => v !== value) : [...arr, value];
+                        return { ...p, [weekType]: newArr };
+                    }
+                    return { ...p, [field]: value };
+                }));
+            };
+
+            const generateSchedule = () => {
+                if (confirm('現在の設定で1年分のスケジュールを自動生成します。手動で編集したデータは上書きされます。よろしいですか？')) {
+                    const newSchedule = {};
+                    let locArray = locations.map(l => l.trim()).filter(l => l);
+                    if (locArray.length === 0) {
+                        locArray = [''];
+                    }
+                    let locIndex = 0;
+
+                    const startDate = new Date(year, 3, 1); // Apr 1
+                    const endDate = new Date(year + 1, 2, 31); // Mar 31
+                    
+                    const holidays = { ...getHolidays(year), ...getHolidays(year + 1) };
+
+                    for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+                        const dateStr = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+                        const dayOfWeek = d.getDay();
+                        
+                        let isWork = false;
+                        let note = holidays[dateStr] || '';
+                        
+                        const m = d.getMonth() + 1;
+                        const dayOfM = d.getDate();
+                        const isNenmatsuNenshi = (m === 12 && dayOfM >= 29) || (m === 1 && dayOfM <= 3);
+                        
+                        // 期間の判定
+                        const activePeriod = periods.find(p => dateStr >= p.start && dateStr <= p.end);
+                        
+                        if (activePeriod && !holidays[dateStr] && !isNenmatsuNenshi) {
+                            // A週/B週判定（期間の開始日の週を基準とする）
+                            // タイムゾーンによるズレを防ぐため、年月日でDateを再生成してローカル時刻の0時基準にする
+                            const pStartParts = activePeriod.start.split('-');
+                            const pStart = new Date(pStartParts[0], pStartParts[1] - 1, pStartParts[2]);
+                            const pStartSun = new Date(pStart.getFullYear(), pStart.getMonth(), pStart.getDate() - pStart.getDay());
+                            
+                            const currSun = new Date(d.getFullYear(), d.getMonth(), d.getDate() - d.getDay());
+                            
+                            // 経過日数を7日で割り、四捨五入して経過週数を出す（タイムゾーンの端数対策）
+                            const weekDiff = Math.round((currSun - pStartSun) / (1000 * 60 * 60 * 24 * 7));
+                            
+                            const isAWeek = weekDiff % 2 === 0;
+                            // B週の設定が空の場合は、常にA週の設定を適用する（毎週同じ曜日）
+                            const targetWeekArr = (isAWeek || activePeriod.b.length === 0) ? activePeriod.a : activePeriod.b;
+                            
+                            if (targetWeekArr.includes(dayOfWeek)) {
+                                isWork = true;
+                            }
+                        }
+
+                        let loc = '';
+                        if (isWork) {
+                            loc = locArray[locIndex % locArray.length];
+                            locIndex++;
+                        }
+
+                        newSchedule[dateStr] = {
+                            isWorkDay: isWork,
+                            location: loc,
+                            note: note,
+                            isEdited: false // 初期生成フラグ
+                        };
+                    }
+                    setSchedule(newSchedule);
+                    alert('スケジュールを生成しました。「カレンダー調整」タブでイレギュラーな日の調整を行ってください。');
+                    setActiveTab('calendar');
+                }
+            };
+
+            const saveEdit = (dateStr, data) => {
+                setSchedule(prev => {
+                    const newSchedule = { ...prev, [dateStr]: { ...prev[dateStr], ...data, isEdited: true } };
+                    
+                    const validLocs = locations.map(l => l.trim()).filter(l => l);
+                    const locArray = validLocs.length > 0 ? validLocs : [''];
+
+                    // 日付順にソートした配列で、以降のローテーションを再計算する
+                    const sortedDates = Object.keys(newSchedule).sort();
+                    const targetIndex = sortedDates.indexOf(dateStr);
+                    
+                    if (targetIndex !== -1) {
+                        // 変更対象日以前の直近の作業箇所のインデックスを探す
+                        let lastLocIndex = -1;
+                        for (let i = targetIndex; i >= 0; i--) {
+                            const d = sortedDates[i];
+                            if (newSchedule[d].isWorkDay) {
+                                const idx = locArray.indexOf(newSchedule[d].location);
+                                lastLocIndex = idx !== -1 ? idx : 0;
+                                break;
+                            }
+                        }
+                        
+                        if (lastLocIndex === -1) {
+                            lastLocIndex = locArray.length - 1; // 過去に作業日がない場合
+                        }
+
+                        // 変更日以降の作業日のローテーションを再割り当て
+                        let currentLocIndex = 0;
+                        if (newSchedule[dateStr].isWorkDay) {
+                            // 変更日自体が作業日の場合、その日の作業箇所を起点とする
+                            currentLocIndex = locArray.indexOf(newSchedule[dateStr].location);
+                            if (currentLocIndex === -1) currentLocIndex = 0;
+                        } else {
+                            // 変更日が休みになった場合は、直近の作業箇所を起点とする
+                            currentLocIndex = lastLocIndex;
+                        }
+                        
+                        for (let i = targetIndex + 1; i < sortedDates.length; i++) {
+                            const d = sortedDates[i];
+                            if (newSchedule[d].isWorkDay) {
+                                currentLocIndex = (currentLocIndex + 1) % locArray.length;
+                                // 以降の日付の作業箇所を上書き（isEditedフラグは変更しない）
+                                newSchedule[d] = { ...newSchedule[d], location: locArray[currentLocIndex] };
+                            }
+                        }
+                    }
+                    return newSchedule;
+                });
+                setEditingDate(null);
+            };
+
+            const getSuggestedLocation = (dateStr) => {
+                const validLocs = locations.map(l => l.trim()).filter(l => l);
+                if (validLocs.length === 0) return '';
+                
+                const sortedDates = Object.keys(schedule).sort();
+                const targetIndex = sortedDates.indexOf(dateStr);
+                if (targetIndex <= 0) return validLocs[0];
+                
+                let lastLoc = '';
+                for (let i = targetIndex - 1; i >= 0; i--) {
+                    const d = sortedDates[i];
+                    if (schedule[d].isWorkDay) {
+                        lastLoc = schedule[d].location;
+                        break;
+                    }
+                }
+                
+                if (!lastLoc) return validLocs[0];
+                const lastIndex = validLocs.indexOf(lastLoc);
+                if (lastIndex === -1) return validLocs[0];
+                return validLocs[(lastIndex + 1) % validLocs.length];
+            };
+
+            const getWorkDaysByMonth = () => {
+                const data = { 4:[], 5:[], 6:[], 7:[], 8:[], 9:[], 10:[], 11:[], 12:[], 1:[], 2:[], 3:[] };
+                const days = ['日', '月', '火', '水', '木', '金', '土'];
+                
+                Object.keys(schedule).sort().forEach(dateStr => {
+                    const row = schedule[dateStr];
+                    if (row.isWorkDay) {
+                        const d = new Date(dateStr);
+                        const m = d.getMonth() + 1;
+                        const dayStr = days[d.getDay()];
+                        const formatted = `${m}/${d.getDate()}(${dayStr})`;
+                        const colorInfo = getLocationColorInfo(row.location);
+                        
+                        if (data[m]) {
+                            data[m].push({ 
+                                text: formatted, 
+                                location: row.location,
+                                colorInfo: colorInfo,
+                                isEdited: row.isEdited 
+                            });
+                        }
+                    }
+                });
+                return data;
+            };
+
+            const downloadExcel = () => {
+                if (Object.keys(schedule).length === 0) return alert('スケジュールがありません。');
+                
+                const workDaysByMonth = getWorkDaysByMonth();
+                const data = [];
+                const cellStyles = {};
+                let currentRow = 0;
+                
+                const baseBorder = {
+                    top: { style: "thin", color: { auto: 1 } },
+                    bottom: { style: "thin", color: { auto: 1 } },
+                    left: { style: "thin", color: { auto: 1 } },
+                    right: { style: "thin", color: { auto: 1 } }
+                };
+                
+                const addHalfYear = (monthsList) => {
+                    const headerRowIdx = currentRow;
+                    data.push(monthsList.map(m => `${m}月`));
+                    monthsList.forEach((_, colIdx) => {
+                        cellStyles[XLSX.utils.encode_cell({ c: colIdx, r: headerRowIdx })] = {
+                            font: { bold: true }, alignment: { horizontal: 'center' }, border: baseBorder
+                        };
+                    });
+                    currentRow++;
+                    
+                    const maxRows = Math.max(...monthsList.map(m => workDaysByMonth[m].length));
+                    for(let i = 0; i < maxRows; i++) {
+                        const row = monthsList.map((m, colIdx) => {
+                            const item = workDaysByMonth[m][i];
+                            const cellAddr = XLSX.utils.encode_cell({ c: colIdx, r: currentRow });
+                            const style = { border: { ...baseBorder } };
+                            
+                            if (item) {
+                                if (item.colorInfo) {
+                                    style.fill = { patternType: "solid", fgColor: { rgb: item.colorInfo.hex } };
+                                }
+                                if (item.isEdited && highlightIrregular) {
+                                    style.border = {
+                                        top: { style: "medium", color: { rgb: "FFFF0000" } },
+                                        bottom: { style: "medium", color: { rgb: "FFFF0000" } },
+                                        left: { style: "medium", color: { rgb: "FFFF0000" } },
+                                        right: { style: "medium", color: { rgb: "FFFF0000" } }
+                                    };
+                                }
+                                style.alignment = { horizontal: 'right' };
+                                cellStyles[cellAddr] = style;
+                                return item.text;
+                            }
+                            cellStyles[cellAddr] = style;
+                            return '';
+                        });
+                        data.push(row);
+                        currentRow++;
+                    }
+                    
+                    const countRowIdx = currentRow;
+                    const counts = monthsList.map(m => `${workDaysByMonth[m].length}回`);
+                    data.push(counts);
+                    monthsList.forEach((_, colIdx) => {
+                        cellStyles[XLSX.utils.encode_cell({ c: colIdx, r: countRowIdx })] = {
+                            alignment: { horizontal: 'right' }, border: baseBorder
+                        };
+                    });
+                    currentRow++;
+                };
+
+                // 上期
+                addHalfYear([4, 5, 6, 7, 8, 9]);
+                data.push([]); // 空行
+                currentRow++;
+                
+                // 下期
+                addHalfYear([10, 11, 12, 1, 2, 3]);
+                data.push([]); // 空行追加
+                currentRow++;
+
+                // 合計行
+                const total = Object.values(workDaysByMonth).reduce((acc, curr) => acc + curr.length, 0);
+                const totalRow = currentRow;
+                data.push(['', '', '', '', '合計', `${total}回`]);
+                
+                cellStyles[XLSX.utils.encode_cell({ c: 4, r: totalRow })] = { font: { bold: true }, alignment: { horizontal: 'center' }, border: baseBorder };
+                cellStyles[XLSX.utils.encode_cell({ c: 5, r: totalRow })] = { font: { bold: true }, alignment: { horizontal: 'right' }, border: baseBorder };
+
+                const ws = XLSX.utils.aoa_to_sheet(data);
+                
+                // ハイライトおよび背景スタイルの適用
+                Object.keys(cellStyles).forEach(addr => {
+                    if (ws[addr]) {
+                        ws[addr].s = cellStyles[addr];
+                    }
+                });
+
+                // 列幅の調整
+                ws['!cols'] = [ {wch: 16}, {wch: 16}, {wch: 16}, {wch: 16}, {wch: 16}, {wch: 16} ];
+
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "年間日程表");
+                const displayYearForFile = yearFormat === 'japanese' ? getJapaneseYear(year) : year;
+                XLSX.writeFile(wb, `作業日程表_${displayYearForFile}年度.xlsx`);
+            };
+            
+            const downloadPDF = () => {
+                const element = document.getElementById('pdf-content');
+                if (!element) return;
+                const displayYearForFile = yearFormat === 'japanese' ? getJapaneseYear(year) : year;
+                const opt = {
+                    margin:       10,
+                    filename:     `作業日程表_${displayYearForFile}年度.pdf`,
+                    image:        { type: 'jpeg', quality: 0.98 },
+                    html2canvas:  { scale: 2 },
+                    jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
+                };
+                html2pdf().set(opt).from(element).save();
+            };
+
+            // --- Sub Components ---
+            const EditModal = ({ date, data, validLocs, suggestedLoc, onClose, onSave }) => {
+                const [isWork, setIsWork] = useState(data ? data.isWorkDay : false);
+                // 既存の作業箇所が有効なパターンに含まれていればそれを、なければ提案された箇所（直前の次のパターン）を初期値にする
+                const [loc, setLoc] = useState(data && data.location && validLocs.includes(data.location) ? data.location : suggestedLoc);
+                const [note, setNote] = useState(data ? data.note : '');
+
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                        <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+                            <h3 className="text-lg font-bold mb-4">{date} の設定</h3>
+                            
+                            <div className="mb-4">
+                                <label className="flex items-center space-x-2 cursor-pointer">
+                                    <input type="checkbox" checked={isWork} onChange={e => setIsWork(e.target.checked)} className="w-5 h-5 text-blue-600 rounded" />
+                                    <span className="font-medium">作業日とする</span>
+                                </label>
+                            </div>
+
+                            {isWork && validLocs.length > 0 && (
+                                <div className="mb-4">
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">作業箇所</label>
+                                    <select value={loc} onChange={e => setLoc(e.target.value)} className="w-full border-gray-300 border rounded-md shadow-sm p-2 bg-white">
+                                        {validLocs.map((l, i) => (
+                                            <option key={i} value={l}>{l}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+
+                            <div className="mb-6">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">備考 (行事、振休など)</label>
+                                <input type="text" value={note} onChange={e => setNote(e.target.value)} className="w-full border-gray-300 border rounded-md shadow-sm p-2" placeholder="例: 運動会、夏休み開始" />
+                            </div>
+
+                            <div className="flex justify-end space-x-3">
+                                <button onClick={onClose} className="px-4 py-2 text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200">キャンセル</button>
+                                <button onClick={() => onSave(date, { isWorkDay: isWork, location: isWork ? loc : '', note })} className="px-4 py-2 text-white bg-blue-600 rounded-md hover:bg-blue-700">保存</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const CalendarView = () => {
+                const daysOfWeek = ['日', '月', '火', '水', '木', '金', '土'];
+                
+                // Get calendar days for current view
+                const getCalendarDays = () => {
+                    const firstDay = new Date(viewYear, currentMonth - 1, 1);
+                    const lastDay = new Date(viewYear, currentMonth, 0);
+                    
+                    const days = [];
+                    // Padding days from previous month
+                    for (let i = 0; i < firstDay.getDay(); i++) {
+                        const d = new Date(viewYear, currentMonth - 1, -firstDay.getDay() + i + 1);
+                        days.push({ date: d, outOfMonth: true });
+                    }
+                    // Days of current month
+                    for (let i = 1; i <= lastDay.getDate(); i++) {
+                        days.push({ date: new Date(viewYear, currentMonth - 1, i), outOfMonth: false });
+                    }
+                    // Padding days for next month
+                    const remainingCells = 42 - days.length; // 6 rows * 7 days
+                    for (let i = 1; i <= remainingCells; i++) {
+                        days.push({ date: new Date(viewYear, currentMonth, i), outOfMonth: true });
+                    }
+                    return days;
+                };
+
+                const calendarDays = useMemo(getCalendarDays, [viewYear, currentMonth]);
+
+                const navigateMonth = (direction) => {
+                    const currentIndex = months.findIndex(m => m.m === currentMonth);
+                    let newIndex = currentIndex + direction;
+                    if (newIndex >= 0 && newIndex < months.length) {
+                        setCurrentMonth(months[newIndex].m);
+                    }
+                };
+
+                return (
+                    <div className="bg-white p-4 md:p-6 rounded-lg shadow-sm border border-gray-200">
+                        <div className="flex items-center justify-between mb-6">
+                            <button onClick={() => navigateMonth(-1)} disabled={currentMonth === 4} className="p-2 border rounded hover:bg-gray-50 disabled:opacity-50">&larr; 前月</button>
+                            <h2 className="text-xl font-bold">{viewYear}年 {currentMonth}月</h2>
+                            <button onClick={() => navigateMonth(1)} disabled={currentMonth === 3} className="p-2 border rounded hover:bg-gray-50 disabled:opacity-50">次月 &rarr;</button>
+                        </div>
+                        
+                        <div className="mb-4 flex gap-2 flex-wrap">
+                            <span className="text-sm bg-blue-100 text-blue-800 px-2 py-1 rounded">使い方:</span>
+                            <span className="text-sm text-gray-600">日付をクリックして、作業日の変更や、振替休日の設定、行事等の入力ができます。</span>
+                        </div>
+
+                        <div className="calendar-grid">
+                            {daysOfWeek.map((day, idx) => (
+                                <div key={day} className={`day-header ${idx === 0 || idx === 6 ? 'text-red-500' : 'text-gray-600'}`}>{day}</div>
+                            ))}
+                            
+                            {calendarDays.map((item, idx) => {
+                                const dateStr = item.date.getFullYear() + '-' + String(item.date.getMonth() + 1).padStart(2, '0') + '-' + String(item.date.getDate()).padStart(2, '0');
+                                const dayData = schedule[dateStr];
+                                const isWeekend = item.date.getDay() === 0 || item.date.getDay() === 6;
+                                
+                                // 指定したキーワードが含まれる場合のみ休日扱い（赤網掛け）
+                                const holidayKeywords = /振替|休日|振休|休校|元日|建国記念|天皇|昭和|憲法|みどり|こども|海|山|敬老|スポーツ|文化|勤労|成人|春分|秋分|国民/;
+                                const m = item.date.getMonth() + 1;
+                                const dateOfMonth = item.date.getDate();
+                                const isNenmatsuNenshi = (m === 12 && dateOfMonth >= 29) || (m === 1 && dateOfMonth <= 3);
+                                const isHoliday = !dayData?.isWorkDay && ((dayData?.note && holidayKeywords.test(dayData.note)) || isNenmatsuNenshi);
+                                
+                                return (
+                                    <div 
+                                        key={idx} 
+                                        onClick={() => setEditingDate(dateStr)}
+                                        className={`day-cell ${item.outOfMonth ? 'out-of-month' : ''} ${dayData?.isWorkDay ? 'is-workday' : ''} ${(!dayData?.isWorkDay && (isWeekend || isHoliday) && !item.outOfMonth) ? 'is-weekend' : ''}`}
+                                    >
+                                        <div className={`text-xs font-bold mb-1 ${item.date.getDay() === 0 ? 'text-red-600' : item.date.getDay() === 6 ? 'text-blue-600' : ''}`}>
+                                            {item.date.getDate()}
+                                        </div>
+                                        {dayData && (
+                                            <div className="text-xs">
+                                                {dayData.isWorkDay && dayData.location && (
+                                                    <div className={`${getLocationColorInfo(dayData.location)?.bg || 'bg-gray-500'} text-white rounded px-1 py-0.5 mb-1 truncate`} title={dayData.location}>
+                                                        {dayData.location}
+                                                    </div>
+                                                )}
+                                                {dayData.note && (
+                                                    <div className="text-red-500 truncate mt-1" title={dayData.note}>{dayData.note}</div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                );
+            };
+
+            return (
+                <div className="max-w-6xl mx-auto p-4 py-8">
+                    <header className="mb-8">
+                        <h1 className="text-3xl font-extrabold text-gray-900 flex items-center gap-3">
+                            <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                            トイレ清掃作業日程表メーカー
+                        </h1>
+                        <p className="text-gray-600 mt-2">基本ルールで一括作成し、行事や振替休日等をカレンダーで設定できます。</p>
+                    </header>
+
+                    {/* Tabs */}
+                    <div className="flex space-x-1 border-b border-gray-200 mb-6">
+                        {['settings', 'calendar', 'list'].map(tab => (
+                            <button
+                                key={tab}
+                                onClick={() => setActiveTab(tab)}
+                                className={`px-4 py-2 font-medium text-sm rounded-t-lg focus:outline-none whitespace-nowrap ${activeTab === tab ? 'bg-white border border-gray-200 border-b-white text-blue-600 -mb-px relative z-10' : 'text-gray-500 hover:text-gray-700 bg-gray-50'}`}
+                            >
+                                {tab === 'settings' ? '1. 基本設定＆生成' : tab === 'calendar' ? '2. カレンダー調整' : '3. 一覧確認・出力'}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Content */}
+                    <main>
+                        {activeTab === 'settings' && (
+                            <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 max-w-2xl mx-auto">
+                                <h2 className="text-lg font-bold mb-6 border-b pb-2">基本スケジュールの生成設定</h2>
+                                
+                                <div className="space-y-6">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">対象年度</label>
+                                        <div className="flex items-center gap-2">
+                                            <input type="number" value={year} onChange={e => {
+                                                const y = parseInt(e.target.value);
+                                                setYear(y);
+                                                localStorage.setItem('lastSelectedYear', y);
+                                            }} className="w-24 border-gray-300 border rounded-md shadow-sm p-2 text-center" />
+                                            <span>年度 (4月〜翌3月)</span>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">期間ごとの作業日設定</label>
+                                        <div className="overflow-x-auto">
+                                            <table className="min-w-full text-sm text-center border-collapse border border-gray-300">
+                                                <thead className="bg-gray-100">
+                                                    <tr>
+                                                        <th className="border border-gray-300 p-2 w-1/4">期間 (初回〜最終)</th>
+                                                        <th className="border border-gray-300 p-2 w-12 text-gray-600 font-medium">パターン</th>
+                                                        <th className="border border-gray-300 p-2 w-12 text-gray-600 font-medium">月</th>
+                                                        <th className="border border-gray-300 p-2 w-12 text-gray-600 font-medium">火</th>
+                                                        <th className="border border-gray-300 p-2 w-12 text-gray-600 font-medium">水</th>
+                                                        <th className="border border-gray-300 p-2 w-12 text-gray-600 font-medium">木</th>
+                                                        <th className="border border-gray-300 p-2 w-12 text-gray-600 font-medium">金</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {periods.map((p, idx) => (
+                                                        <React.Fragment key={p.id}>
+                                                            <tr>
+                                                                <td className="border border-gray-300 p-2 bg-white align-middle" rowSpan="2">
+                                                                    <div className="font-bold mb-1 text-left text-gray-700">期間 {idx + 1}</div>
+                                                                    <div className="flex flex-col gap-1">
+                                                                        <input type="date" value={p.start} onChange={e => updatePeriod(p.id, 'start', e.target.value)} className="w-full text-xs p-1 border rounded" />
+                                                                        <div className="text-gray-400 text-xs">〜</div>
+                                                                        <input type="date" value={p.end} onChange={e => updatePeriod(p.id, 'end', e.target.value)} className="w-full text-xs p-1 border rounded" />
+                                                                    </div>
+                                                                </td>
+                                                                <td className="border border-gray-300 p-2 bg-blue-50 align-middle text-center font-bold text-blue-600">A</td>
+                                                                {[1,2,3,4,5].map(day => (
+                                                                    <td key={`a-${day}`} 
+                                                                        onClick={() => updatePeriod(p.id, null, day, 'a')}
+                                                                        className={`border border-gray-300 p-2 text-center align-middle cursor-pointer transition-colors select-none ${p.a.includes(day) ? 'bg-blue-500 text-white shadow-inner' : 'bg-white text-gray-300 hover:bg-blue-50'}`}>
+                                                                        {p.a.includes(day) ? (
+                                                                            <svg className="w-5 h-5 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                                                                        ) : (
+                                                                            <span className="text-xs">{['月', '火', '水', '木', '金'][day-1]}</span>
+                                                                        )}
+                                                                    </td>
+                                                                ))}
+                                                            </tr>
+                                                            <tr>
+                                                                <td className="border border-gray-300 p-2 bg-amber-50 align-middle text-center font-bold text-amber-600">B</td>
+                                                                {[1,2,3,4,5].map(day => (
+                                                                    <td key={`b-${day}`} 
+                                                                        onClick={() => updatePeriod(p.id, null, day, 'b')}
+                                                                        className={`border border-gray-300 p-2 text-center align-middle cursor-pointer transition-colors select-none ${p.b.includes(day) ? 'bg-amber-500 text-white shadow-inner' : 'bg-white text-gray-300 hover:bg-amber-50'}`}>
+                                                                        {p.b.includes(day) ? (
+                                                                            <svg className="w-5 h-5 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                                                                        ) : (
+                                                                            <span className="text-xs">{['月', '火', '水', '木', '金'][day-1]}</span>
+                                                                        )}
+                                                                    </td>
+                                                                ))}
+                                                            </tr>
+                                                        </React.Fragment>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        <p className="text-xs text-gray-500 mt-2">※毎週同じ曜日に清掃する場合は、A週のみにチェックを入れてください。</p>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">作業箇所のパターン</label>
+                                        <div className="space-y-2">
+                                            {locations.map((loc, index) => (
+                                                <div key={index} className="flex items-center gap-2">
+                                                    <span className="text-sm text-gray-500 font-medium w-4">{index + 1}.</span>
+                                                    <input 
+                                                        type="text" 
+                                                        value={loc} 
+                                                        onChange={e => {
+                                                            const newLocs = [...locations];
+                                                            newLocs[index] = e.target.value;
+                                                            setLocations(newLocs);
+                                                        }} 
+                                                        className="flex-1 border-gray-300 border rounded-md shadow-sm p-2" 
+                                                        placeholder="例: 1階"
+                                                    />
+                                                    {locations.length > 1 && (
+                                                        <button 
+                                                            onClick={() => setLocations(locations.filter((_, i) => i !== index))}
+                                                            className="p-2 text-red-500 hover:bg-red-50 rounded transition-colors"
+                                                            title="削除"
+                                                        >
+                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 12H4"></path></svg>
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <button 
+                                            onClick={() => setLocations([...locations, ''])}
+                                            className="mt-2 flex items-center gap-1 text-sm text-blue-600 hover:text-blue-800 p-1 font-medium transition-colors"
+                                        >
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                                            入力枠を追加
+                                        </button>
+                                        <p className="text-xs text-gray-500 mt-2">※作業箇所のパターンがある場合に入力してください。作業箇所が変わらない場合は空欄でかまいません。</p>
+                                    </div>
+
+                                    <div className="pt-4">
+                                        <button 
+                                            onClick={generateSchedule}
+                                            className="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg shadow hover:bg-blue-700 transition-colors"
+                                        >
+                                            この設定で年間スケジュールを初期生成する
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'calendar' && (
+                            <div>
+                                {Object.keys(schedule).length === 0 ? (
+                                    <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
+                                        <p className="text-gray-500 mb-4">まだスケジュールが生成されていません。</p>
+                                        <button onClick={() => setActiveTab('settings')} className="text-blue-600 hover:underline">基本設定に戻る</button>
+                                    </div>
+                                ) : (
+                                    <CalendarView />
+                                )}
+                            </div>
+                        )}
+
+                        {activeTab === 'list' && (
+                            <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 max-w-4xl mx-auto">
+                                <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
+                                    <div className="flex items-center gap-4">
+                                        <h2 className="text-lg font-bold">年間日程表</h2>
+                                        <select 
+                                            value={yearFormat} 
+                                            onChange={e => setYearFormat(e.target.value)} 
+                                            className="border-gray-300 border rounded shadow-sm p-1 text-sm bg-white"
+                                        >
+                                            <option value="western">西暦表示</option>
+                                            <option value="japanese">和暦表示</option>
+                                        </select>
+                                        <label className="flex items-center space-x-2 cursor-pointer bg-red-50 text-red-700 px-3 py-1.5 rounded-full text-sm border border-red-200">
+                                            <input 
+                                                type="checkbox" 
+                                                checked={highlightIrregular} 
+                                                onChange={e => setHighlightIrregular(e.target.checked)} 
+                                                className="w-4 h-4 text-red-600 rounded cursor-pointer" 
+                                            />
+                                            <span className="font-medium">変更・追加した日を赤枠で囲む</span>
+                                        </label>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button 
+                                            onClick={downloadPDF}
+                                            className="flex items-center gap-2 bg-red-600 text-white px-4 py-2 rounded shadow hover:bg-red-700 transition-colors"
+                                        >
+                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                                            PDFで出力
+                                        </button>
+                                        <button 
+                                            onClick={downloadExcel}
+                                            className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded shadow hover:bg-green-700 transition-colors"
+                                        >
+                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                                            Excelで出力
+                                        </button>
+                                    </div>
+                                </div>
+                                
+                                {Object.keys(schedule).length === 0 ? (
+                                    <p className="text-gray-500 text-center py-8">データがありません</p>
+                                ) : (
+                                    <div className="text-gray-800">
+                                        {(() => {
+                                            const workDays = getWorkDaysByMonth();
+                                            const total = Object.values(workDays).reduce((acc, curr) => acc + curr.length, 0);
+                                            const validLocs = locations.map(l => l.trim()).filter(l => l);
+                                            
+                                            const renderTable = (monthsList) => {
+                                                const maxRows = Math.max(...monthsList.map(m => workDays[m].length));
+                                                const rows = Array.from({ length: maxRows });
+                                                return (
+                                                    <table className="w-full text-center border-collapse border border-gray-300 mb-6 text-sm bg-white">
+                                                        <thead className="bg-gray-100">
+                                                            <tr>
+                                                                {monthsList.map(m => <th key={m} className="border border-gray-300 py-2 w-1/6">{m}月</th>)}
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {rows.map((_, rIdx) => (
+                                                                <tr key={rIdx}>
+                                                                    {monthsList.map(m => {
+                                                                        const item = workDays[m][rIdx];
+                                                                        const bgColor = item?.colorInfo ? item.colorInfo.light : '';
+                                                                        const borderClass = highlightIrregular && item?.isEdited ? 'ring-2 ring-red-500 ring-inset relative z-10' : '';
+                                                                        return (
+                                                                            <td key={m} className={`border border-gray-300 py-1 ${bgColor} ${borderClass}`}>
+                                                                                {item?.text || ''}
+                                                                            </td>
+                                                                        );
+                                                                    })}
+                                                                </tr>
+                                                            ))}
+                                                            <tr className="bg-gray-50 font-bold">
+                                                                {monthsList.map(m => (
+                                                                    <td key={`count-${m}`} className="border border-gray-300 py-1 text-right pr-3">
+                                                                        {workDays[m].length}回
+                                                                    </td>
+                                                                ))}
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                );
+                                            };
+
+                                            return (
+                                                <div id="pdf-content" className="print:text-black p-4 bg-white">
+                                                    <h3 className="text-center font-bold text-xl mb-4">{yearFormat === 'japanese' ? getJapaneseYear(year) : year}年度 トイレ清掃作業日程表</h3>
+                                                    
+                                                    {validLocs.length > 0 && (
+                                                        <div className="flex flex-wrap gap-4 mb-4 justify-center text-sm">
+                                                            {validLocs.map((loc, idx) => {
+                                                                const color = getLocationColorInfo(loc);
+                                                                if (!color) return null;
+                                                                return (
+                                                                    <div key={idx} className="flex items-center gap-1">
+                                                                        <span className={`w-4 h-4 inline-block ${color.light} border border-gray-300`}></span>
+                                                                        <span>{loc}</span>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+
+                                                    {renderTable([4, 5, 6, 7, 8, 9])}
+                                                    {renderTable([10, 11, 12, 1, 2, 3])}
+                                                    <div className="text-right font-bold text-lg mt-2 pr-2">
+                                                        合計: {total}回
+                                                    </div>
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Edit Modal */}
+                    {editingDate && (
+                        <EditModal 
+                            date={editingDate} 
+                            data={schedule[editingDate]} 
+                            validLocs={locations.map(l => l.trim()).filter(l => l)}
+                            suggestedLoc={getSuggestedLocation(editingDate)}
+                            onClose={() => setEditingDate(null)} 
+                            onSave={saveEdit} 
+                        />
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
